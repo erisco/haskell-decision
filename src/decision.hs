@@ -3,182 +3,180 @@
 -- (work in progress)
 -- by Eric Brisco (eric.brisco@gmail.com)
 {-# LANGUAGE TupleSections #-}
-module Decision where
+module Decision.Bi where
 
-data BiDecision a b r =
-  BiDecision {
-    biBMap  :: b -> BiLR,   -- Branch mapping function
-    biRoot  :: BiTree a r   -- Root node
-  }
+import Prelude hiding (
+  foldr,
+  foldl,
+  foldl1
+  )
+import Control.Applicative
+import Data.Foldable
+import Data.Traversable
+import Data.Monoid hiding (
+  Last
+  )
 --
 
-
-data BiTree a r =
-  BiBranch {
-    biLeft   :: BiTree a r,  -- Left branch
-    biRight  :: BiTree a r,  -- Right branch
-    biArg    :: a            -- Next branch argument
+data Decision a r =
+  Branch {
+    branchLeft  :: Decision a r, -- Left branch
+    branchRight :: Decision a r, -- Right branch
+    branchArg   :: a             -- Next branch argument
   }
-  | BiReturn {
-    biReturn :: r            -- Function return value
+  | Return {
+    returnValue :: r             -- Function return value
   }
 --
-
 
 data Cont s a r =
   More {
-    contState  :: s,  -- Next state
-    contArg    :: a   -- Next branch argument
+    moreState  :: s,  -- Next state
+    moreArg    :: a   -- Next branch argument
   }
   | Last {
-    contReturn :: r   -- Function return value
+    lastReturn :: r   -- Function return value
   }
   deriving Show
 --
 
-data BiLR = BiLeft | BiRight
-  deriving Show
---
-
-biRoot' :: (BiTree a1 r1 -> BiTree a2 r2) -> BiDecision a1 b r1 -> BiDecision a2 b r2
-biRoot' f d = d { biRoot = f . biRoot $ d }
-
-biBMap' :: ((b -> BiLR) -> b -> BiLR) -> BiDecision a b r -> BiDecision a b r
-biBMap' f d = d { biBMap = f . biBMap $ d }
-
-biArg' :: (a1 -> a2) -> BiTree a1 r -> BiTree a2 r
-biArg' f (BiBranch l r a) = BiBranch (biArg' f l) (biArg' f r) (f a)
-biArg' _ (BiReturn r    ) = BiReturn r
-
-instance (Show a, Show b, Show r, Enum b, Bounded b) => Show (BiDecision a b r) where
-  show (BiDecision m r) = let
-    bmap = fmap (\x -> (x, m x)) (enumFromTo minBound maxBound)
-    tree = unlines . fmap (\x -> replicate 2 ' ' ++ x) . lines . show $ r
-    in "BiDecision {\n"
-       ++ "  map   = " ++ show bmap ++ "\n"
-       ++ "  tree  =\n"
-       ++ tree
-       ++ "}"
---
-
-instance (Show a, Show r) => Show (BiTree a r) where
+instance (Show a, Show r) => Show (Decision a r) where
   show = let
-    f pad (BiReturn r    ) = pad ++ show r
-    f pad (BiBranch l r a) = let
+    f pad (Return r    ) = pad ++ show r
+    f pad (Branch l r a) = let
       pad' = "| " ++ pad
       in pad ++ show a ++ "-+\n" ++ f pad' l ++ "\n" ++ f pad' r
     in f ""
 --
 
-
-bi ::    (s -> Cont s a r)   -- Left branch function
-      -> (s -> Cont s a r)   -- Right branch function
-      -> (b -> BiLR)         -- Branch map
-      -> Cont s a r          -- Initial input result
-      -> BiDecision a b r
-bi f g m init = let
-  branch (More s' a) = BiBranch (branch $ f s') (branch $ g s') a
-  branch (Last r   ) = BiReturn r
-  in BiDecision m (branch init)
+instance Functor (Decision a) where
+  fmap = desMap id
 --
 
-biFollow ::    BiDecision a b r1
-            -> (r1 -> BiDecision a b r2)
-            -> BiDecision a b r2
-biFollow (BiDecision m root) f = let
-  branch (BiBranch l r a) = BiBranch (branch l) (branch r) a
-  branch (BiReturn r    ) = case f r of (BiDecision _ root') -> root'
-  in BiDecision m (branch root)
+instance Applicative (Decision a) where
+  pure    = Return
+  x <*> y = follow x (flip desRet' y)
 --
 
-biDecide :: (a -> b) -> BiDecision a b r -> r
-biDecide df (BiDecision mf root) = let
-  branch (BiBranch l r a) = case mf . df $ a of
-                              BiLeft  -> branch l
-                              BiRight -> branch r
-  branch (BiReturn r    ) = r
+instance Monad (Decision a) where
+  return  = Return
+  (>>=)   = follow
+--
+
+instance Foldable (Decision a) where
+  foldMap f (Return r)     = f r
+  foldMap f (Branch l r _) = foldMap f l <> foldMap f r
+--
+
+instance Traversable (Decision a) where
+  traverse f (Return r)     = Return <$> f r
+  traverse f (Branch l r a) = (\l' r' -> Branch l' r' a) <$> traverse f l <*> traverse f r
+--
+
+desMap :: (a1 -> a2) -> (r1 -> r2) -> Decision a1 r1 -> Decision a2 r2
+desMap f g (Branch l r a) = Branch (desMap f g l) (desMap f g r) (f a)
+desMap _ g (Return r    ) = Return (g r)
+
+desFlip :: Decision a r -> Decision a r
+desFlip (Branch l r a) = Branch (desFlip r) (desFlip l) a
+desFlip r              = r
+
+desArg' :: (a1 -> a2) -> Decision a1 r -> Decision a2 r
+desArg' f = desMap f id
+
+desRet' :: (r1 -> r2) -> Decision a r1 -> Decision a r2
+desRet' = desMap id
+
+
+build ::    (s -> Cont s a r)   -- Left branch function
+         -> (s -> Cont s a r)   -- Right branch function
+         -> Cont s a r          -- Initial input result
+         -> Decision a r
+build f g init = let
+  branch (More s' a) = Branch (branch $ f s') (branch $ g s') a
+  branch (Last r   ) = Return r
+  in branch init
+--
+
+follow ::    Decision a r1
+          -> (r1 -> Decision a r2)
+          -> Decision a r2
+follow root f = let
+  branch (Branch l r a) = Branch (branch l) (branch r) a
+  branch (Return r    ) = f r
   in branch root
 --
 
-biRange :: BiDecision a b r -> [r]
-biRange (BiDecision _ root) = let
-  branch (BiReturn r    ) = [r]
-  branch (BiBranch l r _) = branch l ++ branch r
-  in branch root
+decide :: (Bounded b, Enum b) => (a -> b) -> Decision a r -> r
+decide f = let
+  which b l r = case [b..minBound] of
+                  [] -> r
+                  _  -> l
+  branch (Branch l r a) = branch $ which (f a) l r
+  branch (Return r    ) = r
+  in branch
 --
 
-biTrivial :: (b -> BiLR) -> r -> BiDecision a b r
-biTrivial m r = BiDecision m (BiReturn r)
+range :: Decision a r -> [r]
+range = foldr (:) []
 
-biArgMap :: (a1 -> a2) -> BiDecision a1 b r -> BiDecision a2 b r
-biArgMap = biRoot' . biArg'
+down :: (a -> c -> c) -> c -> Decision a r -> Decision c r
+down f acc (Branch l r a) = let acc' = f a acc
+                             in Branch (down f acc' l) (down f acc' r) acc'
+down f _   (Return r    ) = Return r
 
-biBMapMap :: ((b -> BiLR) -> b -> BiLR) -> BiDecision a b r -> BiDecision a b r
-biBMapMap = biBMap'
-
-revBMap :: (b -> BiLR) -> b -> BiLR
-revBMap f b = case f b of
-                BiLeft  -> BiRight
-                BiRight -> BiLeft                
---
-
-biDown :: (a -> c -> c) -> c -> BiDecision a b r -> BiDecision c b r
-biDown f c = let
-  branch acc (BiBranch l r a) = let acc' = f a acc
-                                 in BiBranch (branch acc' l) (branch acc' r) acc'
-  branch _   (BiReturn r    ) = BiReturn r
-  in biRoot' (branch c)
---
-
-biDown2 :: (a -> c -> c) -> c -> BiDecision a b r -> BiDecision (a, c) b r
-biDown2 f c = biDown (\a (_, c) -> (a, f a c)) (undefined, c)
+down2 :: (a -> c -> c) -> c -> Decision a r -> Decision (a, c) r
+down2 f c = down (\a (_, c) -> (a, f a c)) (undefined, c)
 
 -- Equiv to but has better performance than:
---   biLook (const . const $ BiLookLR) undefined
-biUp :: (r -> c) -> (a -> c -> c -> c) -> BiDecision a b r -> BiDecision c b r
-biUp init f = let
-  branch (BiBranch l r a) = let (l', lv) = branch l
-                                (r', rv) = branch r
-                                a' = f a lv rv
-                            in (BiBranch l' r' a', a')
-  branch (BiReturn r    ) = (BiReturn r, init r)
-  in biRoot' (fst . branch)
+--   look (const . const $ LookLR) undefined
+up :: (r -> c) -> (a -> c -> c -> c) -> Decision a r -> Decision c r
+up init f = let
+  branch (Branch l r a) = let (l', lv) = branch l
+                              (r', rv) = branch r
+                              a' = f a lv rv
+                           in (Branch l' r' a', a')
+  branch (Return r    ) = (Return r, init r)
+  in fst . branch
 --
 
-biUp2 :: (r -> c) -> (a -> c -> c -> c) -> BiDecision a b r -> BiDecision (a, c) b r
-biUp2 init f = biUp (\r -> (undefined, init r)) (\a (_, c1) (_, c2) -> (a, f a c1 c2))
+up2 :: (r -> c) -> (a -> c -> c -> c) -> Decision a r -> Decision (a, c) r
+up2 init f = up (\r -> (undefined, init r)) (\a (_, c1) (_, c2) -> (a, f a c1 c2))
 
-data BiLook = BiLookL | BiLookR | BiLookLR | BiLookNA
 
-biLook :: (a -> a -> BiLook) -> c -> (r -> c) -> (a -> c -> c -> c) -> BiDecision a b r -> BiDecision c b r
-biLook look base init f = let
+data Look = LookL | LookR | LookLR | LookNA
+
+look :: (a -> a -> Look) -> c -> (r -> c) -> (a -> c -> c -> c) -> Decision a r -> Decision c r
+look sel base init f = let
   
-  ahead look' (BiBranch l r a) = case look' a of
-                                   BiLookL  -> f a (ahead look' l) base
-                                   BiLookR  -> f a base            (ahead look' r)
-                                   BiLookLR -> f a (ahead look' l) (ahead look' r)
-                                   BiLookNA -> f a base            base
-  ahead _     (BiReturn r    ) = init r
+  ahead sel' (Branch l r a) =
+    case sel' a of
+      LookL  -> f a (ahead sel' l) base
+      LookR  -> f a base           (ahead sel' r)
+      LookLR -> f a (ahead sel' l) (ahead sel' r)
+      LookNA -> f a base           base
+  ahead _     (Return r    ) = init r
   
-  branch b@(BiBranch l r a) = BiBranch (branch l) (branch r) (ahead (look a) b)
-  branch   (BiReturn r    ) = BiReturn r
+  branch b@(Branch l r a) = Branch (branch l) (branch r) (ahead (sel a) b)
+  branch   (Return r    ) = Return r
   
-  in biRoot' branch
+  in branch
 --
 
-biLook2 :: (a -> a -> BiLook) -> c -> (r -> c) -> (a -> c -> c -> c) -> BiDecision a b r -> BiDecision (a, c) b r
-biLook2 look base init f = biLook look (undefined, base) (\r -> (undefined, init r)) (\a (_, c1) (_, c2) -> (a, f a c1 c2))
+look2 :: (a -> a -> Look) -> c -> (r -> c) -> (a -> c -> c -> c) -> Decision a r -> Decision (a, c) r
+look2 sel base init f = look sel (undefined, base) (\r -> (undefined, init r)) (\a (_, c1) (_, c2) -> (a, f a c1 c2))
+
+order :: (Enum a) => (a, a) -> (b, b) -> (b, b)
+order (a1, a2) b@(b1, b2) = case [a1..a2] of
+                            [] -> (b2, b1)
+                            _  -> b
+--
+
+
 
 --
 -- Examples
 --
-
-bmap :: Bool -> BiLR
-bmap True  = BiLeft
-bmap False = BiRight
-
-bmapr :: Bool -> BiLR
-bmapr = revBMap bmap
 
 {-
 span :: (a -> Bool) -> [a] -> ([a],[a])
@@ -187,14 +185,15 @@ span p xs@(x:xs')
          | p x          =  let (ys,zs) = span p xs' in (x:ys,zs)
          | otherwise    =  ([],xs)
 -}
-dspan :: [a] -> BiDecision a Bool ([a], [a])
+dspan :: [a] -> Decision a ([a], [a])
 dspan = let
   root         [] = Last ([], [])
   root yys@(y:ys) = More (y, [], ys) y
-  left  (a, xxs,   []) = Last (xxs ++ [a], [])
-  left  (a, xxs, y:ys) = More (y, xxs ++ [a], ys) y
-  right (a, xxs, yys ) = Last (xxs, a:yys)
-  in bi left right bmap . root
+  true  (a, xxs,   []) = Last (xxs ++ [a], [])
+  true  (a, xxs, y:ys) = More (y, xxs ++ [a], ys) y
+  false (a, xxs, yys ) = Last (xxs, a:yys)
+  (left, right) = order (True, False) (true, false)
+  in build left right . root
 --
 
 {-
@@ -203,10 +202,10 @@ groupBy _  []           =  []
 groupBy eq (x:xs)       =  (x:ys) : groupBy eq zs
                            where (ys,zs) = span (eq x) xs
 -}
-dgroupBy :: [a] -> BiDecision (a, a) Bool [[a]]
+dgroupBy :: [a] -> Decision (a, a) [[a]]
 dgroupBy = let
-  f grps []     = biTrivial bmap grps
-  f grps (x:xs) = biArgMap (x,) (dspan xs) `biFollow` \(ys, zs) -> f (grps ++ [x:ys]) zs
+  f grps []     = return grps
+  f grps (x:xs) = desArg' (x,) (dspan xs) >>= \(ys, zs) -> f (grps ++ [x:ys]) zs
   in f []
 --
 
@@ -217,15 +216,16 @@ filter pred (x:xs)
   | pred x         = x : filter pred xs
   | otherwise      = filter pred xs
 -}
-dfilter :: [a] -> BiDecision a Bool [a]
+dfilter :: [a] -> Decision a [a]
 dfilter = let
   root []     = Last []
   root (x:xs) = More (x, [], xs) x
-  left  (a, yys, []    ) = Last (yys ++ [a])
-  left  (a, yys, (x:xs)) = More (x, yys ++ [a], xs) x
-  right (_, yys, []    ) = Last yys
-  right (_, yys, (x:xs)) = More (x, yys, xs) x
-  in bi left right bmap . root
+  true  (a, yys, []    ) = Last (yys ++ [a])
+  true  (a, yys, (x:xs)) = More (x, yys ++ [a], xs) x
+  false (_, yys, []    ) = Last yys
+  false (_, yys, (x:xs)) = More (x, yys, xs) x
+  (left, right) = order (True, False) (true, false)
+  in build left right . root
 --
 
 {-
@@ -233,13 +233,27 @@ nubBy :: (a -> a -> Bool) -> [a] -> [a]
 nubBy eq []     = []
 nubBy eq (x:xs) = x : nubBy eq (filter (\ y -> not (eq x y)) xs)
 -}
-dnubBy :: [a] -> BiDecision (a,a) Bool [a]
+dnubBy :: [a] -> Decision (a,a) [a]
 dnubBy = let
-  dfilter_ x = biBMapMap (revBMap) . biArgMap (x,) . dfilter 
-  f yys []     = biTrivial bmapr yys
-  f yys (x:xs) = dfilter_ x xs `biFollow` \xs' -> f (yys ++ [x]) xs'
+  f yys []     = return yys
+  f yys (x:xs) = desFlip (desArg' (x,) (dfilter xs)) >>= f (yys ++ [x])
   in f []
 --
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
